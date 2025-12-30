@@ -352,7 +352,74 @@ function summarize(results) {
   for (const metric of ["lcp", "ttfb", "fcp", "tbt", "cls", "inp"]) {
     summary.worst[metric] = topWorst(metric);
   }
+
+
+  // --- Aggregation logic for Attribution Report ---
+  const countOccurrences = (items) => {
+    const counts = {};
+    for (const item of items) {
+      if (!item) continue;
+      counts[item] = (counts[item] || 0) + 1;
+    }
+    return Object.entries(counts)
+      .sort((a, b) => b[1] - a[1])
+      .map(([key, count]) => ({ key, count }));
+  };
+
+  const lcpElements = ok.map(r => {
+    const d = r.metrics.diagnostics?.lcpElement;
+    return d ? (d.selector || d.url) : null;
+  });
+
+  const blockingResources = ok.map(r => {
+    const d = r.metrics.diagnostics?.renderBlockingTop;
+    // We only care about the URL for aggregation
+    return d ? d.url : null;
+  });
+
+  const inpTargets = ok.map(r => {
+    return r.metrics.diagnostics?.inpTarget || null;
+  });
+
+  summary.attribution = {
+    lcpElements: countOccurrences(lcpElements),
+    blockingResources: countOccurrences(blockingResources),
+    inpTargets: countOccurrences(inpTargets),
+  };
+
   return summary;
+}
+
+function generateAttributionMarkdown(summary) {
+  const lines = [];
+  lines.push(`# Performance Attribution Report`);
+  lines.push(`Generated at: ${new Date().toISOString()}`);
+  lines.push(`Total Pages Analyzed: ${summary.count} (Success: ${summary.success}, Failed: ${summary.failed})`);
+  lines.push(``);
+
+  const makeTable = (title, data, keyHeader) => {
+    lines.push(`## ${title}`);
+    if (!data || data.length === 0) {
+      lines.push(`_No data detected._`);
+      lines.push(``);
+      return;
+    }
+    lines.push(`| Count | ${keyHeader} |`);
+    lines.push(`|-------|--------------|`);
+    // Top 20 only to keep it readable
+    for (const item of data.slice(0, 20)) {
+      // Escape pipe characters in key to prevent breaking markdown table
+      const keySafe = item.key.replace(/\|/g, '\\|');
+      lines.push(`| ${item.count} | \`${keySafe}\` |`);
+    }
+    lines.push(``);
+  };
+
+  makeTable("🛑 Top LCP Bottlenecks (LCP Element)", summary.attribution.lcpElements, "Selector / URL");
+  makeTable("🚧 Top Blocking Resources", summary.attribution.blockingResources, "Resource URL");
+  makeTable("🖱️ Top Slow Interactions (INP Target)", summary.attribution.inpTargets, "Interaction Target");
+
+  return lines.join("\n");
 }
 
 function parseArgs(argv) {
@@ -547,7 +614,15 @@ async function main() {
       "",
     ].join(","));
   }
+
+  const reportMdPath = path.join(outDir, "attribution_report.md");
+
+
   fs.writeFileSync(csvPath, `${rows.join(os.EOL)}${os.EOL}`, "utf8");
+
+  // Write Attribution Report
+  const mdContent = generateAttributionMarkdown(summary);
+  fs.writeFileSync(reportMdPath, mdContent, "utf8");
 
   console.log("=== Summary ===");
   console.log(JSON.stringify(summary, null, 2));
@@ -565,8 +640,16 @@ async function main() {
     }
   }
 
+  // Brief Console Attribution
+  console.log("\n=== Top LCP Elements ===");
+  summary.attribution.lcpElements.slice(0, 3).forEach(x => console.log(`${x.count}x ${x.key}`));
+
+  console.log("\n=== Top Blocking Resources ===");
+  summary.attribution.blockingResources.slice(0, 3).forEach(x => console.log(`${x.count}x ${x.key}`));
+
   console.log("\n✅ 分析完成！");
   console.log("\n📊 报告文件：");
+  console.log(`  - 汇总报告（Markdown）: ${reportMdPath}`);
   console.log(`  - 表格（CSV）: ${csvPath}`);
   console.log(`  - 详细数据（JSON）: ${jsonPath}`);
   console.log(`  - Lighthouse原始数据: ${path.join(outDir, "lhr")}`);
