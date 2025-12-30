@@ -1,0 +1,6 @@
+node_modules/
+lcp_output/
+.DS_Store
+*.log
+__pycache__/
+*.pyc

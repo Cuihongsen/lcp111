@@ -117,24 +117,62 @@ function extractMetrics(lhr) {
     ? Number(lhr.categories.performance.score)
     : null;
 
-  const lcpElemItems = auditItems(lhr, "largest-contentful-paint-element");
-  const lcpElem = lcpElemItems[0];
-  const lcpElementInfo = lcpElem && typeof lcpElem === "object"
+  /* 1. LCP Element Information */
+  // LCP Element audit structure is complex: details -> items (list) -> item (table) -> items (rows) -> item -> node
+  const lcpAudit = (lhr.audits || {})["largest-contentful-paint-element"];
+  let lcpNode = null;
+  if (lcpAudit && lcpAudit.details && lcpAudit.details.items && lcpAudit.details.items.length) {
+    const firstTable = lcpAudit.details.items[0];
+    if (firstTable.items && firstTable.items.length && firstTable.items[0].node) {
+      lcpNode = firstTable.items[0].node;
+    }
+  }
+
+  const lcpElementInfo = lcpNode
     ? {
-        selector: lcpElem.selector,
-        nodeLabel: lcpElem.nodeLabel,
-        snippet: lcpElem.snippet,
-        url: lcpElem.url || lcpElem.sourceURL || lcpElem.requestUrl,
-      }
+      selector: lcpNode.selector || "",
+      nodeLabel: lcpNode.nodeLabel || "",
+      snippet: lcpNode.snippet || "",
+      url: lcpNode.url || lcpNode.sourceURL || lcpNode.requestUrl || "",
+    }
     : null;
 
+  /* 2. Top Blocking Resource */
   const rbItems = auditItems(lhr, "render-blocking-resources");
-  const rbTop = rbItems.slice(0, 10).map((it) => ({
-    url: it.url,
-    resourceType: it.resourceType,
-    wastedMs: it.wastedMs,
-    totalBytes: it.totalBytes,
-  }));
+  const rbTop = rbItems
+    .slice(0, 5)
+    .map((it) => ({
+      url: it.url,
+      wastedMs: it.wastedMs,
+    }))
+    .sort((a, b) => b.wastedMs - a.wastedMs)[0]; // The single worst resource
+
+  /* 3. INP Target Information */
+  // INP is often found in the 'interaction-to-next-paint' audit details
+  // The 'items' array usually contains the events. We look for the one with highest duration.
+  // Note: Lighthouse structure for INP can vary, but usually it's in details.items
+  let inpTarget = null;
+  const inpItems = auditItems(lhr, "interaction-to-next-paint");
+  // Find the item with the longest processing duration or total duration
+  if (inpItems && inpItems.length > 0) {
+    const worstInp = inpItems.sort((a, b) => (b.duration || 0) - (a.duration || 0))[0];
+    if (worstInp && worstInp.data) {
+      // Sometimes the element info is in `data` (old LHR) or direct properties
+      inpTarget = worstInp.data.selector || worstInp.data.nodeLabel;
+    } else {
+      // Newer Lighthouse versions might just have selector/nodeLabel on the item
+      inpTarget = worstInp.selector || worstInp.nodeLabel;
+    }
+  }
+
+  // Fallback: check experimental-interaction-to-next-paint if standard one is empty
+  if (!inpTarget) {
+    const expInpItems = auditItems(lhr, "experimental-interaction-to-next-paint");
+    if (expInpItems && expInpItems.length > 0) {
+      const worstExp = expInpItems.sort((a, b) => (b.duration || 0) - (a.duration || 0))[0];
+      inpTarget = worstExp.selector || worstExp.nodeLabel;
+    }
+  }
 
   return {
     perfScore,
@@ -144,8 +182,11 @@ function extractMetrics(lhr) {
     tbt,
     fcp,
     ttfb,
-    lcpElement: lcpElementInfo,
-    renderBlockingTop: rbTop,
+    diagnostics: {
+      lcpElement: lcpElementInfo,
+      renderBlockingTop: rbTop,
+      inpTarget: inpTarget || "",
+    }
   };
 }
 
@@ -240,16 +281,29 @@ async function runUrlRepeats({
   }
 
   const collect = (k) => runs.map((r) => r.metrics[k]).filter((v) => Number.isFinite(v));
+  const medianLcp = median(collect("lcp"));
+  // Find representative run (closest to median LCP)
+  let bestRun = runs[0];
+  let minDiff = Infinity;
+  for (const r of runs) {
+    if (!Number.isFinite(r.metrics.lcp)) continue;
+    const diff = Math.abs(r.metrics.lcp - medianLcp);
+    if (diff < minDiff) {
+      minDiff = diff;
+      bestRun = r;
+    }
+  }
+
   const metrics = {
     perfScore: median(collect("perfScore")),
-    lcp: median(collect("lcp")),
+    lcp: medianLcp,
     inp: median(collect("inp")),
     cls: median(collect("cls")),
     tbt: median(collect("tbt")),
     fcp: median(collect("fcp")),
     ttfb: median(collect("ttfb")),
-    lcpElement: runs[0].metrics.lcpElement,
-    renderBlockingTop: runs[0].metrics.renderBlockingTop,
+    // Use diagnostics from the representative run
+    diagnostics: bestRun.metrics.diagnostics,
   };
 
   return {
@@ -298,7 +352,74 @@ function summarize(results) {
   for (const metric of ["lcp", "ttfb", "fcp", "tbt", "cls", "inp"]) {
     summary.worst[metric] = topWorst(metric);
   }
+
+
+  // --- Aggregation logic for Attribution Report ---
+  const countOccurrences = (items) => {
+    const counts = {};
+    for (const item of items) {
+      if (!item) continue;
+      counts[item] = (counts[item] || 0) + 1;
+    }
+    return Object.entries(counts)
+      .sort((a, b) => b[1] - a[1])
+      .map(([key, count]) => ({ key, count }));
+  };
+
+  const lcpElements = ok.map(r => {
+    const d = r.metrics.diagnostics?.lcpElement;
+    return d ? (d.selector || d.url) : null;
+  });
+
+  const blockingResources = ok.map(r => {
+    const d = r.metrics.diagnostics?.renderBlockingTop;
+    // We only care about the URL for aggregation
+    return d ? d.url : null;
+  });
+
+  const inpTargets = ok.map(r => {
+    return r.metrics.diagnostics?.inpTarget || null;
+  });
+
+  summary.attribution = {
+    lcpElements: countOccurrences(lcpElements),
+    blockingResources: countOccurrences(blockingResources),
+    inpTargets: countOccurrences(inpTargets),
+  };
+
   return summary;
+}
+
+function generateAttributionMarkdown(summary) {
+  const lines = [];
+  lines.push(`# Performance Attribution Report`);
+  lines.push(`Generated at: ${new Date().toISOString()}`);
+  lines.push(`Total Pages Analyzed: ${summary.count} (Success: ${summary.success}, Failed: ${summary.failed})`);
+  lines.push(``);
+
+  const makeTable = (title, data, keyHeader) => {
+    lines.push(`## ${title}`);
+    if (!data || data.length === 0) {
+      lines.push(`_No data detected._`);
+      lines.push(``);
+      return;
+    }
+    lines.push(`| Count | ${keyHeader} |`);
+    lines.push(`|-------|--------------|`);
+    // Top 20 only to keep it readable
+    for (const item of data.slice(0, 20)) {
+      // Escape pipe characters in key to prevent breaking markdown table
+      const keySafe = item.key.replace(/\|/g, '\\|');
+      lines.push(`| ${item.count} | \`${keySafe}\` |`);
+    }
+    lines.push(``);
+  };
+
+  makeTable("🛑 Top LCP Bottlenecks (LCP Element)", summary.attribution.lcpElements, "Selector / URL");
+  makeTable("🚧 Top Blocking Resources", summary.attribution.blockingResources, "Resource URL");
+  makeTable("🖱️ Top Slow Interactions (INP Target)", summary.attribution.inpTargets, "Interaction Target");
+
+  return lines.join("\n");
 }
 
 function parseArgs(argv) {
@@ -400,8 +521,7 @@ async function main() {
     const m = r.metrics;
     console.log(`[OK] ${r.url}`);
     console.log(
-      `  LCP=${fmtMs(m.lcp)} (${r.grades.LCP})  INP=${fmtMs(m.inp)} (${r.grades.INP})  CLS=${
-        m.cls ?? ""
+      `  LCP=${fmtMs(m.lcp)} (${r.grades.LCP})  INP=${fmtMs(m.inp)} (${r.grades.INP})  CLS=${m.cls ?? ""
       } (${r.grades.CLS})  TTFB=${fmtMs(m.ttfb)} (${r.grades.TTFB})`,
     );
     console.log("");
@@ -434,6 +554,9 @@ async function main() {
     "CLS评级",
     "INP",
     "INP评级",
+    "LCP元素/来源",
+    "最大阻塞资源",
+    "INP交互元素",
     "错误信息",
   ];
   const rows = [headers.join(",")];
@@ -454,11 +577,20 @@ async function main() {
         "",
         "",
         "",
+        "",
+        "",
+        "",
+        "",
         `"${r.error.replace(/"/g, '""')}"`,
       ].join(","));
       continue;
     }
     const m = r.metrics;
+    const dia = m.diagnostics || {};
+    const lcpDesc = dia.lcpElement ? (dia.lcpElement.selector || dia.lcpElement.url) : "";
+    const rbDesc = dia.renderBlockingTop ? `${Math.round(dia.renderBlockingTop.wastedMs)}ms - ${dia.renderBlockingTop.url}` : "";
+    const inpDesc = dia.inpTarget || "";
+
     const score = Number.isFinite(m.perfScore) ? Math.round(m.perfScore * 100) : "";
     rows.push([
       r.url,
@@ -475,10 +607,22 @@ async function main() {
       r.grades.CLS,
       fmtMs(m.inp),
       r.grades.INP,
+      // Diagnostics columns
+      `"${(lcpDesc || "").replace(/"/g, '""')}"`,
+      `"${(rbDesc || "").replace(/"/g, '""')}"`,
+      `"${(inpDesc || "").replace(/"/g, '""')}"`,
       "",
     ].join(","));
   }
+
+  const reportMdPath = path.join(outDir, "attribution_report.md");
+
+
   fs.writeFileSync(csvPath, `${rows.join(os.EOL)}${os.EOL}`, "utf8");
+
+  // Write Attribution Report
+  const mdContent = generateAttributionMarkdown(summary);
+  fs.writeFileSync(reportMdPath, mdContent, "utf8");
 
   console.log("=== Summary ===");
   console.log(JSON.stringify(summary, null, 2));
@@ -496,8 +640,16 @@ async function main() {
     }
   }
 
+  // Brief Console Attribution
+  console.log("\n=== Top LCP Elements ===");
+  summary.attribution.lcpElements.slice(0, 3).forEach(x => console.log(`${x.count}x ${x.key}`));
+
+  console.log("\n=== Top Blocking Resources ===");
+  summary.attribution.blockingResources.slice(0, 3).forEach(x => console.log(`${x.count}x ${x.key}`));
+
   console.log("\n✅ 分析完成！");
   console.log("\n📊 报告文件：");
+  console.log(`  - 汇总报告（Markdown）: ${reportMdPath}`);
   console.log(`  - 表格（CSV）: ${csvPath}`);
   console.log(`  - 详细数据（JSON）: ${jsonPath}`);
   console.log(`  - Lighthouse原始数据: ${path.join(outDir, "lhr")}`);
