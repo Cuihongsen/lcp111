@@ -5,6 +5,49 @@ const path = require("path");
 const os = require("os");
 const { spawn } = require("child_process");
 
+class ProgressBar {
+  constructor(total) {
+    this.total = total;
+    this.current = 0;
+    this.width = 30;
+    this.chars = {
+      complete: "█",
+      incomplete: "░",
+    };
+  }
+
+  render() {
+    const percent = this.total > 0 ? Math.round((this.current / this.total) * 100) : 0;
+    const filled = this.total > 0 ? Math.round((this.width * this.current) / this.total) : 0;
+    const empty = this.width - filled;
+    // Safety check for negative values
+    const safeFilled = Math.max(0, filled);
+    const safeEmpty = Math.max(0, empty);
+    
+    const bar = this.chars.complete.repeat(safeFilled) + this.chars.incomplete.repeat(safeEmpty);
+    
+    // Clear current line and write output
+    if (process.stdout.isTTY) {
+      process.stdout.clearLine(0);
+      process.stdout.cursorTo(0);
+      process.stdout.write(`Progress: [${bar}] ${this.current}/${this.total} (${percent}%)`);
+    } else {
+       // Fallback for non-TTY (e.g. piped output): only print on significant milestones or don't print
+    }
+  }
+
+  tick() {
+    this.current++;
+    this.render();
+  }
+
+  done() {
+    if (process.stdout.isTTY) {
+      process.stdout.write("\n");
+    }
+  }
+}
+
 const THRESHOLDS = {
   LCP: { good: 2500, ni: 4000 },
   INP: { good: 200, ni: 500 },
@@ -502,16 +545,25 @@ async function main() {
   );
   console.log(`Output: ${outDir}`);
 
-  const results = await runPool(urls, args.concurrency, (u) => runUrlRepeats({
-    url: u,
-    repeats: args.repeats,
-    outDir: path.join(outDir, "lhr"),
-    device: args.device,
-    timeoutSec: args.timeoutSec,
-    preferNpx: args.preferNpx,
-    chromeFlags: args.chromeFlags,
-    userDataDir,
-  }));
+  const bar = new ProgressBar(urls.length);
+  if (process.stdout.isTTY) bar.render();
+
+  const results = await runPool(urls, args.concurrency, async (u) => {
+    const r = await runUrlRepeats({
+      url: u,
+      repeats: args.repeats,
+      outDir: path.join(outDir, "lhr"),
+      device: args.device,
+      timeoutSec: args.timeoutSec,
+      preferNpx: args.preferNpx,
+      chromeFlags: args.chromeFlags,
+      userDataDir,
+    });
+    bar.tick();
+    return r;
+  });
+
+  bar.done();
 
   for (const r of results) {
     if (r.error) {
