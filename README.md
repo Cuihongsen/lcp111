@@ -12,6 +12,32 @@
 
 > Python 依赖见 `requirements.txt`（当前无第三方依赖）。
 
+## 安装依赖
+
+### 1) Python 依赖
+
+当前没有第三方依赖，无需额外安装。
+
+```bash
+python3 --version
+```
+
+### 2) Node.js / Lighthouse
+
+安装 Node.js 后，选择以下其一：
+
+- 全局安装 Lighthouse：
+
+```bash
+npm i -g lighthouse
+```
+
+- 或使用 npx（无需全局安装）：
+
+```bash
+npx lighthouse --version
+```
+
 ## 快速使用
 
 1. 准备 URL 列表文件（每行一个 URL，支持 `#` 注释），例如 `urls.txt`。
