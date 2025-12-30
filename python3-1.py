@@ -87,13 +87,20 @@ def sanitize_filename(url: str, unique_suffix: str = "") -> str:
 
 
 def run_cmd(cmd: list[str], timeout_sec: int) -> tuple[int, str, str]:
-    p = subprocess.run(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        timeout=timeout_sec,
-        text=True
-    )
+    try:
+        p = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout_sec,
+            text=True
+        )
+    except FileNotFoundError as exc:
+        cmd_name = cmd[0] if cmd else "lighthouse"
+        raise RuntimeError(
+            f"Command not found: {cmd_name}. "
+            "Please install Lighthouse (npm i -g lighthouse) or use --prefer-npx."
+        ) from exc
     return p.returncode, p.stdout, p.stderr
 
 
@@ -661,7 +668,7 @@ def main():
     os.makedirs(out_dir, exist_ok=True)
     os.makedirs(os.path.join(out_dir, "lhr"), exist_ok=True)
 
-    started = dt.datetime.utcnow().isoformat() + "Z"
+    started = dt.datetime.now(dt.UTC).isoformat()
     print(f"Run Lighthouse: urls={len(urls)} device={args.device} repeats={args.repeats} concurrency={args.concurrency}")
     print(f"Output: {out_dir}")
 
@@ -706,7 +713,7 @@ def main():
     summary = summarize(results)
 
     report = {
-        "generatedAt": dt.datetime.utcnow().isoformat() + "Z",
+        "generatedAt": dt.datetime.now(dt.UTC).isoformat(),
         "startedAt": started,
         "args": vars(args),
         "summary": summary,
