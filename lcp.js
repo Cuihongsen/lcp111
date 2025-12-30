@@ -117,24 +117,62 @@ function extractMetrics(lhr) {
     ? Number(lhr.categories.performance.score)
     : null;
 
-  const lcpElemItems = auditItems(lhr, "largest-contentful-paint-element");
-  const lcpElem = lcpElemItems[0];
-  const lcpElementInfo = lcpElem && typeof lcpElem === "object"
+  /* 1. LCP Element Information */
+  // LCP Element audit structure is complex: details -> items (list) -> item (table) -> items (rows) -> item -> node
+  const lcpAudit = (lhr.audits || {})["largest-contentful-paint-element"];
+  let lcpNode = null;
+  if (lcpAudit && lcpAudit.details && lcpAudit.details.items && lcpAudit.details.items.length) {
+    const firstTable = lcpAudit.details.items[0];
+    if (firstTable.items && firstTable.items.length && firstTable.items[0].node) {
+      lcpNode = firstTable.items[0].node;
+    }
+  }
+
+  const lcpElementInfo = lcpNode
     ? {
-        selector: lcpElem.selector,
-        nodeLabel: lcpElem.nodeLabel,
-        snippet: lcpElem.snippet,
-        url: lcpElem.url || lcpElem.sourceURL || lcpElem.requestUrl,
-      }
+      selector: lcpNode.selector || "",
+      nodeLabel: lcpNode.nodeLabel || "",
+      snippet: lcpNode.snippet || "",
+      url: lcpNode.url || lcpNode.sourceURL || lcpNode.requestUrl || "",
+    }
     : null;
 
+  /* 2. Top Blocking Resource */
   const rbItems = auditItems(lhr, "render-blocking-resources");
-  const rbTop = rbItems.slice(0, 10).map((it) => ({
-    url: it.url,
-    resourceType: it.resourceType,
-    wastedMs: it.wastedMs,
-    totalBytes: it.totalBytes,
-  }));
+  const rbTop = rbItems
+    .slice(0, 5)
+    .map((it) => ({
+      url: it.url,
+      wastedMs: it.wastedMs,
+    }))
+    .sort((a, b) => b.wastedMs - a.wastedMs)[0]; // The single worst resource
+
+  /* 3. INP Target Information */
+  // INP is often found in the 'interaction-to-next-paint' audit details
+  // The 'items' array usually contains the events. We look for the one with highest duration.
+  // Note: Lighthouse structure for INP can vary, but usually it's in details.items
+  let inpTarget = null;
+  const inpItems = auditItems(lhr, "interaction-to-next-paint");
+  // Find the item with the longest processing duration or total duration
+  if (inpItems && inpItems.length > 0) {
+    const worstInp = inpItems.sort((a, b) => (b.duration || 0) - (a.duration || 0))[0];
+    if (worstInp && worstInp.data) {
+      // Sometimes the element info is in `data` (old LHR) or direct properties
+      inpTarget = worstInp.data.selector || worstInp.data.nodeLabel;
+    } else {
+      // Newer Lighthouse versions might just have selector/nodeLabel on the item
+      inpTarget = worstInp.selector || worstInp.nodeLabel;
+    }
+  }
+
+  // Fallback: check experimental-interaction-to-next-paint if standard one is empty
+  if (!inpTarget) {
+    const expInpItems = auditItems(lhr, "experimental-interaction-to-next-paint");
+    if (expInpItems && expInpItems.length > 0) {
+      const worstExp = expInpItems.sort((a, b) => (b.duration || 0) - (a.duration || 0))[0];
+      inpTarget = worstExp.selector || worstExp.nodeLabel;
+    }
+  }
 
   return {
     perfScore,
@@ -144,8 +182,11 @@ function extractMetrics(lhr) {
     tbt,
     fcp,
     ttfb,
-    lcpElement: lcpElementInfo,
-    renderBlockingTop: rbTop,
+    diagnostics: {
+      lcpElement: lcpElementInfo,
+      renderBlockingTop: rbTop,
+      inpTarget: inpTarget || "",
+    }
   };
 }
 
@@ -240,16 +281,29 @@ async function runUrlRepeats({
   }
 
   const collect = (k) => runs.map((r) => r.metrics[k]).filter((v) => Number.isFinite(v));
+  const medianLcp = median(collect("lcp"));
+  // Find representative run (closest to median LCP)
+  let bestRun = runs[0];
+  let minDiff = Infinity;
+  for (const r of runs) {
+    if (!Number.isFinite(r.metrics.lcp)) continue;
+    const diff = Math.abs(r.metrics.lcp - medianLcp);
+    if (diff < minDiff) {
+      minDiff = diff;
+      bestRun = r;
+    }
+  }
+
   const metrics = {
     perfScore: median(collect("perfScore")),
-    lcp: median(collect("lcp")),
+    lcp: medianLcp,
     inp: median(collect("inp")),
     cls: median(collect("cls")),
     tbt: median(collect("tbt")),
     fcp: median(collect("fcp")),
     ttfb: median(collect("ttfb")),
-    lcpElement: runs[0].metrics.lcpElement,
-    renderBlockingTop: runs[0].metrics.renderBlockingTop,
+    // Use diagnostics from the representative run
+    diagnostics: bestRun.metrics.diagnostics,
   };
 
   return {
@@ -400,8 +454,7 @@ async function main() {
     const m = r.metrics;
     console.log(`[OK] ${r.url}`);
     console.log(
-      `  LCP=${fmtMs(m.lcp)} (${r.grades.LCP})  INP=${fmtMs(m.inp)} (${r.grades.INP})  CLS=${
-        m.cls ?? ""
+      `  LCP=${fmtMs(m.lcp)} (${r.grades.LCP})  INP=${fmtMs(m.inp)} (${r.grades.INP})  CLS=${m.cls ?? ""
       } (${r.grades.CLS})  TTFB=${fmtMs(m.ttfb)} (${r.grades.TTFB})`,
     );
     console.log("");
@@ -434,6 +487,9 @@ async function main() {
     "CLS评级",
     "INP",
     "INP评级",
+    "LCP元素/来源",
+    "最大阻塞资源",
+    "INP交互元素",
     "错误信息",
   ];
   const rows = [headers.join(",")];
@@ -454,11 +510,20 @@ async function main() {
         "",
         "",
         "",
+        "",
+        "",
+        "",
+        "",
         `"${r.error.replace(/"/g, '""')}"`,
       ].join(","));
       continue;
     }
     const m = r.metrics;
+    const dia = m.diagnostics || {};
+    const lcpDesc = dia.lcpElement ? (dia.lcpElement.selector || dia.lcpElement.url) : "";
+    const rbDesc = dia.renderBlockingTop ? `${Math.round(dia.renderBlockingTop.wastedMs)}ms - ${dia.renderBlockingTop.url}` : "";
+    const inpDesc = dia.inpTarget || "";
+
     const score = Number.isFinite(m.perfScore) ? Math.round(m.perfScore * 100) : "";
     rows.push([
       r.url,
@@ -475,6 +540,10 @@ async function main() {
       r.grades.CLS,
       fmtMs(m.inp),
       r.grades.INP,
+      // Diagnostics columns
+      `"${(lcpDesc || "").replace(/"/g, '""')}"`,
+      `"${(rbDesc || "").replace(/"/g, '""')}"`,
+      `"${(inpDesc || "").replace(/"/g, '""')}"`,
       "",
     ].join(","));
   }
