@@ -497,6 +497,7 @@ def lighthouse_once(
     timeout_sec: int,
     prefer_npx: bool,
     extra_chrome_flags: str,
+    user_data_dir: str | None = None,
     run_id: str = "",
 ) -> dict[str, Any]:
     os.makedirs(out_dir, exist_ok=True)
@@ -508,6 +509,9 @@ def lighthouse_once(
     lhr_path = os.path.join(out_dir, filename)
 
     cmd_prefix = find_lighthouse_bin(prefer_npx)
+    chrome_flags = extra_chrome_flags
+    if user_data_dir and "--user-data-dir" not in chrome_flags:
+        chrome_flags = f"{chrome_flags} --user-data-dir={user_data_dir}"
     cmd = cmd_prefix + [
         url,
         "--quiet",
@@ -516,7 +520,7 @@ def lighthouse_once(
         "--only-categories=performance",
         f"--form-factor={device}",
         # 让 Chrome headless 跑（你也可以去掉 headless，看可视化窗口）
-        f'--chrome-flags={extra_chrome_flags}',
+        f'--chrome-flags={chrome_flags}',
     ]
 
     rc, stdout, stderr = run_cmd(cmd, timeout_sec)
@@ -548,6 +552,7 @@ def run_url_repeats(
     timeout_sec: int,
     prefer_npx: bool,
     extra_chrome_flags: str,
+    user_data_dir: str | None = None,
 ) -> dict[str, Any]:
     runs: list[dict[str, Any]] = []
     errors: list[str] = []
@@ -556,7 +561,16 @@ def run_url_repeats(
         try:
             # 使用序号作为run_id，避免重复运行时的文件覆盖
             run_id = f"run{i+1}" if repeats > 1 else ""
-            r = lighthouse_once(url, out_dir, device, timeout_sec, prefer_npx, extra_chrome_flags, run_id=run_id)
+            r = lighthouse_once(
+                url,
+                out_dir,
+                device,
+                timeout_sec,
+                prefer_npx,
+                extra_chrome_flags,
+                user_data_dir=user_data_dir,
+                run_id=run_id,
+            )
             runs.append(r)
         except Exception as e:
             errors.append(str(e))
@@ -672,6 +686,7 @@ def main():
     ap.add_argument("--output", default="lcp_output", help="输出目录（默认lcp_output）")
     ap.add_argument("--prefer-npx", action="store_true", help="用 npx lighthouse 而不是全局 lighthouse")
     ap.add_argument("--chrome-flags", default="--headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage", help="Chrome启动参数")
+    ap.add_argument("--user-data-dir", help="Chrome用户数据目录（Windows 下可避免临时目录清理失败）")
     args = ap.parse_args()
     
     # 参数验证
@@ -691,6 +706,11 @@ def main():
     print(f"Run Lighthouse: urls={len(urls)} device={args.device} repeats={args.repeats} concurrency={args.concurrency}")
     print(f"Output: {out_dir}")
 
+    user_data_dir = args.user_data_dir
+    if not user_data_dir and os.name == "nt":
+        user_data_dir = os.path.join(out_dir, "chrome-profile")
+        os.makedirs(user_data_dir, exist_ok=True)
+
     def worker(u: str) -> dict[str, Any]:
         return run_url_repeats(
             url=u,
@@ -700,6 +720,7 @@ def main():
             timeout_sec=args.timeout_sec,
             prefer_npx=args.prefer_npx,
             extra_chrome_flags=args.chrome_flags,
+            user_data_dir=user_data_dir,
         )
 
     results: list[dict[str, Any]] = []
