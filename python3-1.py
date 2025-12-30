@@ -9,7 +9,7 @@ import json
 import os
 import re
 import subprocess
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 
 # ---- 常用阈值（用于给出 GOOD/NI/POOR 评级；lab 指标，仅作回归对比） ----
@@ -23,7 +23,7 @@ THRESHOLDS = {
 }
 
 
-def grade(metric: str, value: Optional[float]) -> str:
+def grade(metric: str, value: float | None) -> str:
     if value is None:
         return "N/A"
     t = THRESHOLDS.get(metric)
@@ -36,7 +36,7 @@ def grade(metric: str, value: Optional[float]) -> str:
     return "POOR"
 
 
-def median(xs: List[float]) -> Optional[float]:
+def median(xs: list[float]) -> float | None:
     xs = [x for x in xs if x is not None]
     if not xs:
         return None
@@ -48,7 +48,7 @@ def median(xs: List[float]) -> Optional[float]:
     return (xs[mid - 1] + xs[mid]) / 2.0
 
 
-def percentile(xs: List[float], p: float) -> Optional[float]:
+def percentile(xs: list[float], p: float) -> float | None:
     xs = [x for x in xs if x is not None]
     if not xs:
         return None
@@ -62,7 +62,7 @@ def percentile(xs: List[float], p: float) -> Optional[float]:
     return xs[lo] + (xs[hi] - xs[lo]) * frac
 
 
-def read_urls(urls_file: Optional[str], single_url: Optional[str]) -> List[str]:
+def read_urls(urls_file: str | None, single_url: str | None) -> list[str]:
     if single_url:
         return [single_url.strip()]
     if not urls_file:
@@ -86,7 +86,7 @@ def sanitize_filename(url: str, unique_suffix: str = "") -> str:
     return s
 
 
-def run_cmd(cmd: List[str], timeout_sec: int) -> Tuple[int, str, str]:
+def run_cmd(cmd: list[str], timeout_sec: int) -> tuple[int, str, str]:
     p = subprocess.run(
         cmd,
         stdout=subprocess.PIPE,
@@ -97,7 +97,7 @@ def run_cmd(cmd: List[str], timeout_sec: int) -> Tuple[int, str, str]:
     return p.returncode, p.stdout, p.stderr
 
 
-def find_lighthouse_bin(prefer_npx: bool) -> List[str]:
+def find_lighthouse_bin(prefer_npx: bool) -> list[str]:
     """
     返回 lighthouse 命令前缀：
     - prefer_npx=True -> ["npx", "lighthouse"]
@@ -108,7 +108,7 @@ def find_lighthouse_bin(prefer_npx: bool) -> List[str]:
     return ["lighthouse"]
 
 
-def audit_numeric(lhr: Dict[str, Any], audit_id: str) -> Optional[float]:
+def audit_numeric(lhr: dict[str, Any], audit_id: str) -> float | None:
     a = (lhr.get("audits") or {}).get(audit_id)
     if not a:
         return None
@@ -116,7 +116,7 @@ def audit_numeric(lhr: Dict[str, Any], audit_id: str) -> Optional[float]:
     return float(v) if isinstance(v, (int, float)) else None
 
 
-def audit_items(lhr: Dict[str, Any], audit_id: str) -> List[Dict[str, Any]]:
+def audit_items(lhr: dict[str, Any], audit_id: str) -> list[dict[str, Any]]:
     a = (lhr.get("audits") or {}).get(audit_id) or {}
     details = a.get("details") or {}
     items = details.get("items") or []
@@ -125,7 +125,7 @@ def audit_items(lhr: Dict[str, Any], audit_id: str) -> List[Dict[str, Any]]:
     return []
 
 
-def extract_metrics(lhr: Dict[str, Any]) -> Dict[str, Any]:
+def extract_metrics(lhr: dict[str, Any]) -> dict[str, Any]:
     # core-ish
     lcp = audit_numeric(lhr, "largest-contentful-paint")
     cls = audit_numeric(lhr, "cumulative-layout-shift")
@@ -186,6 +186,32 @@ def extract_metrics(lhr: Dict[str, Any]) -> Dict[str, Any]:
     long_tasks = (lhr.get("audits") or {}).get("long-tasks") or {}
     mainthread = (lhr.get("audits") or {}).get("mainthread-work-breakdown") or {}
     unused_js = (lhr.get("audits") or {}).get("unused-javascript") or {}
+    diagnostics = (lhr.get("audits") or {}).get("diagnostics") or {}
+    third_party = (lhr.get("audits") or {}).get("third-party-summary") or {}
+
+    audit_evidence = {
+        "bootup-time": {
+            "numericValue": bootup.get("numericValue"),
+        },
+        "long-tasks": {
+            "items": (long_tasks.get("details") or {}).get("items"),
+        },
+        "mainthread-work-breakdown": {
+            "numericValue": mainthread.get("numericValue"),
+        },
+        "unused-javascript": {
+            "overallSavingsMs": (unused_js.get("details") or {}).get("overallSavingsMs"),
+        },
+        "render-blocking-resources": {
+            "items": rb_items[:10],
+        },
+        "diagnostics": {
+            "details": diagnostics.get("details"),
+        },
+        "third-party-summary": {
+            "items": (third_party.get("details") or {}).get("items"),
+        },
+    }
 
     # 这些 audit 的 score=0 常表示“有问题”
     if lcp_lazy.get("score") == 0:
@@ -220,11 +246,12 @@ def extract_metrics(lhr: Dict[str, Any]) -> Dict[str, Any]:
         "lcpElement": lcp_element_info,
         "renderBlockingTop": rb_top,
         "flags": flags,
+        "auditEvidence": audit_evidence,
     }
 
 
-def build_lcp_reasons(m: Dict[str, Any]) -> List[Dict[str, str]]:
-    reasons: List[Dict[str, str]] = []
+def build_lcp_reasons(m: dict[str, Any]) -> list[dict[str, str]]:
+    reasons: list[dict[str, str]] = []
     lcp = m.get("lcp")
     ttfb = m.get("ttfb")
     tbt = m.get("tbt")
@@ -291,6 +318,152 @@ def build_lcp_reasons(m: Dict[str, Any]) -> List[Dict[str, str]]:
     return reasons
 
 
+def build_issue_list(m: dict[str, Any]) -> list[dict[str, Any]]:
+    issues: list[dict[str, Any]] = []
+    flags = m.get("flags") or {}
+    audit_evidence = m.get("auditEvidence") or {}
+    render_blocking = m.get("renderBlockingTop") or []
+
+    def add_issue(
+        level: str,
+        metric: str,
+        title: str,
+        detail: str,
+        value: float | None,
+        audit_id: str | None = None,
+    ) -> None:
+        issues.append({
+            "level": level,
+            "metric": metric,
+            "title": title,
+            "detail": detail,
+            "value": value,
+            "auditId": audit_id,
+            "evidence": audit_evidence.get(audit_id) if audit_id else None,
+        })
+
+    lcp = m.get("lcp")
+    if isinstance(lcp, (int, float)) and lcp > 4000:
+        add_issue(
+            "HIGH",
+            "LCP",
+            "LCP 偏慢",
+            f"LCP≈{lcp/1000:.2f}s，需关注资源请求、渲染阻塞、解码绘制与主线程阻塞。",
+            float(lcp),
+            "largest-contentful-paint",
+        )
+
+    ttfb = m.get("ttfb")
+    if isinstance(ttfb, (int, float)) and ttfb > 1200:
+        add_issue(
+            "HIGH",
+            "TTFB",
+            "TTFB 偏高（后端/网关/CDN 回源慢）",
+            f"TTFB≈{ttfb/1000:.2f}s，先看 CDN 命中率/回源耗时/接口耗时/重定向链路。",
+            float(ttfb),
+            "server-response-time",
+        )
+
+    inp = m.get("inp")
+    if isinstance(inp, (int, float)) and inp > 500:
+        add_issue(
+            "HIGH",
+            "INP",
+            "交互响应慢（INP 高）",
+            f"INP≈{int(inp)}ms，排查长任务、主线程阻塞与第三方脚本。",
+            float(inp),
+            "interaction-to-next-paint",
+        )
+
+    cls = m.get("cls")
+    if isinstance(cls, (int, float)) and cls > 0.25:
+        add_issue(
+            "MED",
+            "CLS",
+            "布局抖动明显（CLS 高）",
+            f"CLS≈{cls:.3f}，检查图片/广告/懒加载占位、字体加载策略。",
+            float(cls),
+            "cumulative-layout-shift",
+        )
+
+    tbt = m.get("tbt")
+    if isinstance(tbt, (int, float)) and tbt > 600:
+        add_issue(
+            "MED",
+            "TBT",
+            "主线程阻塞（TBT 高）",
+            f"TBT≈{int(tbt)}ms，常见原因：bundle 大、初始化重、第三方脚本占用。",
+            float(tbt),
+            "total-blocking-time",
+        )
+
+    fcp = m.get("fcp")
+    if isinstance(fcp, (int, float)) and fcp > 3000:
+        add_issue(
+            "MED",
+            "FCP",
+            "首次内容渲染慢（FCP 高）",
+            f"FCP≈{fcp/1000:.2f}s，关注关键 CSS、首屏资源优先级与阻塞脚本。",
+            float(fcp),
+            "first-contentful-paint",
+        )
+
+    if flags.get("lcpLazyLoaded"):
+        add_issue(
+            "HIGH",
+            "LCP",
+            "LCP 元素被懒加载拖慢",
+            "首屏最大元素不要 lazy（尤其是首屏大图/大模块）。",
+            lcp if isinstance(lcp, (int, float)) else None,
+            "lcp-lazy-loaded",
+        )
+
+    if flags.get("needsPrioritizeLcpImage"):
+        add_issue(
+            "HIGH",
+            "LCP",
+            "LCP 图片未被优先加载（缺 preload / 优先级）",
+            "对 LCP 图片做 preload / fetchpriority，提高首屏优先级。",
+            lcp if isinstance(lcp, (int, float)) else None,
+            "prioritize-lcp-image",
+        )
+
+    if render_blocking:
+        rb_url = render_blocking[0].get("url") or "未知资源"
+        add_issue(
+            "MED",
+            "FCP",
+            "存在渲染阻塞资源（CSS/同步 JS）",
+            f"示例阻塞资源：{rb_url}",
+            None,
+            "render-blocking-resources",
+        )
+
+    if flags.get("heavyBootup"):
+        add_issue(
+            "MED",
+            "TBT",
+            "JS 启动/解析执行开销大（bootup-time 高）",
+            "拆包、延迟非首屏代码、减少 polyfill/过度转译。",
+            tbt if isinstance(tbt, (int, float)) else None,
+            "bootup-time",
+        )
+
+    if flags.get("lotsUnusedJs"):
+        add_issue(
+            "LOW",
+            "TBT",
+            "未使用 JS 较多（可减包）",
+            "减少首屏下载/解析量，间接改善 LCP/FCP/INP。",
+            None,
+            "unused-javascript",
+        )
+
+    level_order = {"HIGH": 0, "MED": 1, "LOW": 2}
+    issues.sort(key=lambda x: (level_order.get(x["level"], 99), -(x["value"] or 0)))
+    return issues
+
+
 def lighthouse_once(
     url: str,
     out_dir: str,
@@ -299,7 +472,7 @@ def lighthouse_once(
     prefer_npx: bool,
     extra_chrome_flags: str,
     run_id: str = "",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     os.makedirs(out_dir, exist_ok=True)
     # 使用run_id避免重复运行时的文件覆盖
     unique_id = f"{device}"
@@ -329,6 +502,7 @@ def lighthouse_once(
 
     metrics = extract_metrics(lhr)
     reasons = build_lcp_reasons(metrics)
+    issues = build_issue_list(metrics)
 
     return {
         "url": url,
@@ -336,6 +510,7 @@ def lighthouse_once(
         "lhrPath": lhr_path,
         "metrics": metrics,
         "lcpReasons": reasons,
+        "issues": issues,
     }
 
 
@@ -347,9 +522,9 @@ def run_url_repeats(
     timeout_sec: int,
     prefer_npx: bool,
     extra_chrome_flags: str,
-) -> Dict[str, Any]:
-    runs: List[Dict[str, Any]] = []
-    errors: List[str] = []
+) -> dict[str, Any]:
+    runs: list[dict[str, Any]] = []
+    errors: list[str] = []
 
     for i in range(repeats):
         try:
@@ -368,7 +543,7 @@ def run_url_repeats(
         return {"url": url, "device": device, "error": error_msg or "unknown error", "allErrors": errors}
 
     # 多次取中位数（更稳）
-    def collect(k: str) -> List[float]:
+    def collect(k: str) -> list[float]:
         xs = []
         for r in runs:
             v = r["metrics"].get(k)
@@ -404,15 +579,16 @@ def run_url_repeats(
             "TTFB": grade("TTFB", m["ttfb"]),
         },
         "lcpReasons": build_lcp_reasons(m),
+        "issues": build_issue_list(m),
         "sampleLhr": runs[0]["lhrPath"],
         "errors": errors,
     }
 
 
-def summarize(results: List[Dict[str, Any]]) -> Dict[str, Any]:
+def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
     ok = [r for r in results if not r.get("error")]
 
-    def collect(key: str) -> List[float]:
+    def collect(key: str) -> list[float]:
         xs = []
         for r in ok:
             v = (r.get("metrics") or {}).get(key)
@@ -426,6 +602,7 @@ def summarize(results: List[Dict[str, Any]]) -> Dict[str, Any]:
         "failed": len(results) - len(ok),
         "avg": {},
         "p75": {},
+        "worst": {},
     }
 
     for k in ["lcp", "inp", "cls", "tbt", "fcp", "ttfb", "perfScore"]:
@@ -435,10 +612,22 @@ def summarize(results: List[Dict[str, Any]]) -> Dict[str, Any]:
         summary["avg"][k] = sum(arr) / len(arr)
         summary["p75"][k] = percentile(arr, 0.75)
 
+    def top_worst(key: str, n: int = 5) -> list[tuple[str, float]]:
+        rows = []
+        for r in ok:
+            v = (r.get("metrics") or {}).get(key)
+            if isinstance(v, (int, float)):
+                rows.append((r["url"], float(v)))
+        rows.sort(key=lambda x: x[1], reverse=True)
+        return rows[:n]
+
+    for metric in ["lcp", "ttfb", "fcp", "tbt", "cls", "inp"]:
+        summary["worst"][metric] = top_worst(metric)
+
     return summary
 
 
-def fmt_ms(v: Optional[float]) -> str:
+def fmt_ms(v: float | None) -> str:
     if v is None:
         return ""
     if v >= 1000:
@@ -476,7 +665,7 @@ def main():
     print(f"Run Lighthouse: urls={len(urls)} device={args.device} repeats={args.repeats} concurrency={args.concurrency}")
     print(f"Output: {out_dir}")
 
-    def worker(u: str) -> Dict[str, Any]:
+    def worker(u: str) -> dict[str, Any]:
         return run_url_repeats(
             url=u,
             repeats=args.repeats,
@@ -487,7 +676,7 @@ def main():
             extra_chrome_flags=args.chrome_flags,
         )
 
-    results: List[Dict[str, Any]] = []
+    results: list[dict[str, Any]] = []
     with futures.ThreadPoolExecutor(max_workers=max(1, args.concurrency)) as ex:
         fut_map = {ex.submit(worker, u): u for u in urls}
         for fut in futures.as_completed(fut_map):
@@ -499,14 +688,15 @@ def main():
                     print(f"[FAIL] {u}\n  {r['error']}\n")
                 else:
                     m = r["metrics"]
+                    issues = r.get("issues") or []
                     print(f"[OK] {u}")
                     print(f"  LCP={fmt_ms(m.get('lcp'))} ({r['grades']['LCP']})  "
                           f"INP={fmt_ms(m.get('inp'))} ({r['grades']['INP']})  "
                           f"CLS={m.get('cls') if m.get('cls') is not None else ''} ({r['grades']['CLS']})  "
                           f"TTFB={fmt_ms(m.get('ttfb'))} ({r['grades']['TTFB']})")
-                    # 打印前2条原因
-                    for reason in (r.get("lcpReasons") or [])[:2]:
-                        print(f"  - ({reason['level']}) {reason['title']}: {reason['detail']}")
+                    # 打印前2条问题（按严重性排序）
+                    for issue in issues[:2]:
+                        print(f"  - ({issue['level']}) {issue['title']}: {issue['detail']}")
                     print()
             except Exception as e:
                 results.append({"url": u, "device": args.device, "error": str(e)})
@@ -549,6 +739,7 @@ def main():
             "INP评级",
             "主要问题1",
             "主要问题2",
+            "主要问题3",
             "错误信息",
         ])
         w.writeheader()
@@ -572,14 +763,16 @@ def main():
                     "INP评级": "",
                     "主要问题1": "",
                     "主要问题2": "",
+                    "主要问题3": "",
                     "错误信息": r.get("error", ""),
                 })
                 continue
 
             m = r.get("metrics") or {}
-            reasons = r.get("lcpReasons") or []
-            top1 = reasons[0]["title"] if len(reasons) > 0 else ""
-            top2 = reasons[1]["title"] if len(reasons) > 1 else ""
+            issues = r.get("issues") or []
+            top1 = issues[0]["title"] if len(issues) > 0 else ""
+            top2 = issues[1]["title"] if len(issues) > 1 else ""
+            top3 = issues[2]["title"] if len(issues) > 2 else ""
 
             score = m.get("perfScore")
             w.writerow({
@@ -599,13 +792,14 @@ def main():
                 "INP评级": r["grades"].get("INP", "N/A"),
                 "主要问题1": top1,
                 "主要问题2": top2,
+                "主要问题3": top3,
                 "错误信息": "",
             })
 
     # 打印最差 Top5
     ok = [r for r in results if not r.get("error")]
 
-    def top_worst(key: str, n: int = 5) -> List[Tuple[str, float]]:
+    def top_worst(key: str, n: int = 5) -> list[tuple[str, float]]:
         rows = []
         for r in ok:
             v = (r.get("metrics") or {}).get(key)
@@ -617,13 +811,17 @@ def main():
     print("=== Summary ===")
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 
-    print("\n=== Worst LCP Top5 ===")
-    for u, v in top_worst("lcp"):
-        print(f"{fmt_ms(v)}  {u}")
-
-    print("\n=== Worst CLS Top5 ===")
-    for u, v in top_worst("cls"):
-        print(f"{v:.3f}  {u}")
+    for metric, label, formatter in [
+        ("lcp", "LCP", lambda v: fmt_ms(v)),
+        ("ttfb", "TTFB", lambda v: fmt_ms(v)),
+        ("fcp", "FCP", lambda v: fmt_ms(v)),
+        ("tbt", "TBT", lambda v: fmt_ms(v)),
+        ("cls", "CLS", lambda v: f"{v:.3f}"),
+        ("inp", "INP", lambda v: fmt_ms(v)),
+    ]:
+        print(f"\n=== Worst {label} Top5 ===")
+        for u, v in top_worst(metric):
+            print(f"{formatter(v)}  {u}")
 
     print(f"\n✅ 分析完成！")
     print(f"\n📊 报告文件：")
