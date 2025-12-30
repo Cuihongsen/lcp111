@@ -1,0 +1,13 @@
+{
+  "name": "lcp-lighthouse-runner",
+  "version": "1.0.0",
+  "description": "Batch Lighthouse runner for LCP analysis",
+  "main": "lcp.js",
+  "bin": {
+    "lcp-runner": "lcp.js"
+  },
+  "scripts": {
+    "start": "node lcp.js"
+  },
+  "license": "MIT"
+}

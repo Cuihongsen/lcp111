@@ -4,25 +4,14 @@
 
 ## 依赖
 
-- Python 3.14
 - Node.js + npm（用于运行 Lighthouse）
   - 全局安装：
     - `npm i -g lighthouse`
   - 或使用 `--prefer-npx` 走 `npx lighthouse`
 
-> Python 依赖见 `requirements.txt`（当前无第三方依赖）。
-
 ## 安装依赖
 
-### 1) Python 依赖
-
-当前没有第三方依赖，无需额外安装。
-
-```bash
-python3 --version
-```
-
-### 2) Node.js / Lighthouse
+### Node.js / Lighthouse
 
 安装 Node.js 后，选择以下其一：
 
@@ -44,7 +33,13 @@ npx lighthouse --version
 2. 运行脚本：
 
 ```bash
-python3 python3-1.py --urls-file urls.txt --device mobile --repeats 1 --concurrency 2
+node lcp.js --urls-file urls.txt --device mobile --repeats 1 --concurrency 2
+```
+
+或使用 npm 脚本：
+
+```bash
+npm start -- --urls-file urls.txt --device mobile --repeats 1 --concurrency 2
 ```
 
 ### 常用参数
@@ -56,6 +51,7 @@ python3 python3-1.py --urls-file urls.txt --device mobile --repeats 1 --concurre
 - `--concurrency`：并发数
 - `--prefer-npx`：使用 `npx lighthouse`
 - `--output`：输出目录
+- `--user-data-dir`：Chrome 用户数据目录（Windows 下可避免临时目录清理失败）
 
 ### 输出
 
