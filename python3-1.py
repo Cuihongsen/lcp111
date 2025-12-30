@@ -8,6 +8,7 @@ import datetime as dt
 import json
 import os
 import re
+import shutil
 import subprocess
 from typing import Any
 
@@ -86,10 +87,28 @@ def sanitize_filename(url: str, unique_suffix: str = "") -> str:
     return s
 
 
+def resolve_command(cmd: list[str]) -> list[str]:
+    if not cmd:
+        return cmd
+    cmd_name = cmd[0]
+    resolved = shutil.which(cmd_name)
+    if resolved:
+        cmd[0] = resolved
+        return cmd
+    if os.name == "nt" and not cmd_name.lower().endswith(".cmd"):
+        alt_name = f"{cmd_name}.cmd"
+        resolved_alt = shutil.which(alt_name)
+        if resolved_alt:
+            cmd[0] = resolved_alt
+            return cmd
+    return cmd
+
+
 def run_cmd(cmd: list[str], timeout_sec: int) -> tuple[int, str, str]:
     try:
+        resolved_cmd = resolve_command(cmd)
         p = subprocess.run(
-            cmd,
+            resolved_cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             timeout=timeout_sec,
